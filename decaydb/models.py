@@ -31,6 +31,8 @@ CREATE TABLE IF NOT EXISTS object_data (
     record_type TEXT NOT NULL,
     payload TEXT NOT NULL,
     original_filename TEXT NOT NULL DEFAULT '',
+    original_payload TEXT NOT NULL DEFAULT '',
+    keep_original_restore INTEGER NOT NULL DEFAULT 0,
     deleted INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL
 );
@@ -94,5 +96,9 @@ def bootstrap(conn: sqlite3.Connection) -> None:
     object_cols = {row[1] for row in conn.execute("PRAGMA table_info(object_data)").fetchall()}
     if "original_filename" not in object_cols:
         conn.execute("ALTER TABLE object_data ADD COLUMN original_filename TEXT NOT NULL DEFAULT ''")
+    if "original_payload" not in object_cols:
+        conn.execute("ALTER TABLE object_data ADD COLUMN original_payload TEXT NOT NULL DEFAULT ''")
+    if "keep_original_restore" not in object_cols:
+        conn.execute("ALTER TABLE object_data ADD COLUMN keep_original_restore INTEGER NOT NULL DEFAULT 0")
     conn.commit()
 

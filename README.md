@@ -42,14 +42,15 @@ Objects move through stages:
 
 `Run Tick` advances eligible objects by one stage.
 
-## Restore model (important)
+## Deletion and purge model (important)
 
-Each policy includes `restore_window_sec`:
+RustDB runs in single-copy mode:
 
-- restore **within window**: can return full-quality origin
-- restore **after window**: degraded restore only (best available artifact)
+- each stage keeps only the latest active artifact
+- old intermediate artifacts are removed as decay advances
+- delete stage purges physical files immediately
 
-This keeps short-term safety but preserves long-term storage savings.
+This maximizes storage savings and minimizes artifact buildup.
 
 ## Supported file types and decay behavior
 
@@ -66,6 +67,22 @@ Storage location:
 - default: `rustdb_storage/`
 - override: `RUSTDB_STORAGE_DIR`
 
+## Upload toggle: keep original for restore
+
+During upload you can enable:
+
+- `Keep original for full restore window`
+
+If enabled:
+
+- RustDB preserves the original file path for the configured `restore_window_sec`
+- restore within window can return original-format quality
+- other generated artifacts still decay/purge normally
+
+If disabled:
+
+- RustDB stays in strict single-copy mode and purges aggressively
+
 ## Dashboard usage
 
 1. Connect (`Auto Detect Backend` -> `Test Connection`)
@@ -76,8 +93,19 @@ Storage location:
    - `View Data`
    - `Rename`
    - `Delete`
-   - `Restore`
+   - `Purge Now` (immediate file/artifact removal)
+   - `Restore` (available only if an artifact still exists)
 6. Inspect object history in "Inspect One Object"
+
+### Why connection settings exist
+
+Most users can ignore connection settings and use defaults on localhost.
+
+Advanced settings are for:
+
+- running API on a different host/port
+- using a different API key/tenant mapping
+- connecting to remote/self-hosted RustDB instances in team environments
 
 ## View Data behavior
 
@@ -117,6 +145,43 @@ OpenAPI: `openapi.yaml`
 - header: `X-API-Key`
 - key mapping: `RUSTDB_API_KEYS` (default includes `devkey:default`)
 - objects/policies/metrics are tenant-scoped
+
+### API key customization (self-hosted users)
+
+You do not need to pre-provision keys in code. Users customize keys at deploy/runtime using env vars.
+
+Format:
+
+```text
+RUSTDB_API_KEYS=key1:tenant_a,key2:tenant_b
+```
+
+Examples:
+
+- single tenant:
+  - `RUSTDB_API_KEYS=mysecretkey:default`
+- multi-tenant:
+  - `RUSTDB_API_KEYS=clientAkey:tenant_a,clientBkey:tenant_b,opskey:ops`
+
+Windows PowerShell example:
+
+```powershell
+$env:RUSTDB_API_KEYS="mysecretkey:default"
+.\start_local.ps1
+```
+
+Docker Compose example:
+
+```yaml
+environment:
+  RUSTDB_API_KEYS: mysecretkey:default,teamkey:team_a
+```
+
+Client request example:
+
+```bash
+curl -H "X-API-Key: mysecretkey" http://127.0.0.1:8080/objects
+```
 
 ## Environment
 

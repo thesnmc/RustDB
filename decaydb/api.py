@@ -118,6 +118,7 @@ class DecayApiHandler(BaseHTTPRequestHandler):
                             "record_type": r["record_type"],
                             "filename": Path(str(r["payload"])).name if str(r["payload"]).find("/") >= 0 or str(r["payload"]).find("\\") >= 0 else "",
                             "original_filename": r["original_filename"] if "original_filename" in r.keys() else "",
+                            "keep_original_restore": bool(r["keep_original_restore"]) if "keep_original_restore" in r.keys() else False,
                             "current_size_bytes": (Path(str(r["payload"])).stat().st_size if Path(str(r["payload"])).exists() and Path(str(r["payload"])).is_file() else len(str(r["payload"]))),
                             "deleted": bool(r["deleted"]),
                             "current_stage": int(r["current_stage"]),
@@ -259,6 +260,7 @@ class DecayApiHandler(BaseHTTPRequestHandler):
                     return
                 filename = data["filename"]
                 mime_type = data.get("mime_type")
+                keep_original_restore = bool(data.get("keep_original_restore", False))
                 stored_path = save_binary(filename, raw)
                 record_type = self._infer_record_type(filename, mime_type)
                 object_id = self.engine.create_object(
@@ -267,6 +269,7 @@ class DecayApiHandler(BaseHTTPRequestHandler):
                     payload=stored_path,
                     policy_id=policy_id,
                     original_filename=filename,
+                    keep_original_restore=keep_original_restore,
                 )
                 self._json(201, {"object_id": object_id, "record_type": record_type, "stored_path": stored_path})
                 return
@@ -291,6 +294,7 @@ class DecayApiHandler(BaseHTTPRequestHandler):
                 raw = base64.b64decode(content_base64, validate=True)
                 mime_type = data.get("mime_type")
                 policy_id = int(data["policy_id"])
+                keep_original_restore = bool(data.get("keep_original_restore", False))
             except (json.JSONDecodeError, KeyError, ValueError, binascii.Error):
                 self._json(400, {"error": "invalid_upload_payload"})
                 return
@@ -302,6 +306,7 @@ class DecayApiHandler(BaseHTTPRequestHandler):
                 payload=stored_path,
                 policy_id=policy_id,
                 original_filename=filename,
+                keep_original_restore=keep_original_restore,
             )
             self._json(201, {"object_id": object_id, "record_type": record_type, "stored_path": stored_path})
             return
@@ -344,6 +349,11 @@ class DecayApiHandler(BaseHTTPRequestHandler):
                 return
             ok = self.engine.rename_object_file(tenant_id, object_id, new_name)
             self._json(200, {"renamed": ok})
+            return
+        if route.startswith("/objects/") and route.endswith("/purge"):
+            object_id = int(route.split("/")[-2])
+            ok = self.engine.purge_object_now(tenant_id, object_id)
+            self._json(200, {"purged": ok})
             return
         self._json(404, {"error": "not_found"})
 

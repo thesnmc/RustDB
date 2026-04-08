@@ -36,20 +36,25 @@
   <div class="muted">Simple mode: connect, add data, age data, and inspect history.</div>
 
   <div class="card">
-    <h2>Step 1 - Connect</h2>
-    <div class="help">If this is your first run, click <b>Auto Detect Backend</b>, then <b>Test Connection</b>.</div>
+    <h2>Step 1 - Ready</h2>
+    <div class="help">Default mode auto-connects to local RustDB. Most users can ignore advanced settings.</div>
     <div class="row">
-      <input id="apiBase" placeholder="Server address (example: http://127.0.0.1:8080)" value="" style="min-width:320px" />
-      <input id="apiKey" placeholder="Access key" value="devkey" />
-      <button class="secondary" onclick="testConnection()">Test Connection</button>
-      <button class="secondary" onclick="autoDetectBackend()">Auto Detect Backend</button>
-      <button class="secondary" onclick="createDefaultPolicy()">Create Default Policy</button>
       <button onclick="refreshAll()">Refresh</button>
       <button onclick="runTick()">Run Tick</button>
       <button class="secondary" onclick="toggleAutoRefresh()" id="autoBtn">Auto Refresh Off</button>
       <span class="pill" id="statusPill">Idle</span>
       <span class="muted" id="status">Ready to connect.</span>
     </div>
+    <details>
+      <summary class="muted">Advanced connection and policy settings</summary>
+      <div class="row" style="margin-top:10px">
+        <input id="apiBase" placeholder="Server address (example: http://127.0.0.1:8080)" value="" style="min-width:320px" />
+        <input id="apiKey" placeholder="Access key" value="devkey" />
+        <button class="secondary" onclick="testConnection()">Test Connection</button>
+        <button class="secondary" onclick="autoDetectBackend()">Auto Detect Backend</button>
+        <button class="secondary" onclick="createDefaultPolicy()">Create Default Policy</button>
+      </div>
+    </details>
   </div>
 
   <div class="card">
@@ -58,6 +63,7 @@
     <div class="row">
       <select id="policySelect"></select>
       <input type="file" id="uploadFileInput" />
+      <label class="muted"><input type="checkbox" id="restoreOriginalToggle" /> Keep original for full restore window</label>
       <button onclick="uploadOnly()">Upload Data</button>
     </div>
   </div>
@@ -71,7 +77,7 @@
     <table>
       <thead>
         <tr>
-          <th>ID</th><th>Type</th><th>Original Name</th><th>Current Name</th><th>Size (KB)</th><th>Stage</th><th>Deleted</th><th>Hold</th><th>No Decay</th><th>Actions</th>
+          <th>ID</th><th>Type</th><th>Original Name</th><th>Current Name</th><th>Size (KB)</th><th>Keep Original</th><th>Stage</th><th>Deleted</th><th>Hold</th><th>No Decay</th><th>Actions</th>
         </tr>
       </thead>
       <tbody id="objectsBody"></tbody>
@@ -210,9 +216,13 @@
     }
 
     async function loadPolicies() {
-      const data = await hit("/rot/policies");
+      let data = await hit("/rot/policies");
       const sel = document.getElementById("policySelect");
       sel.innerHTML = "";
+      if (!data.policies || data.policies.length === 0) {
+        await createDefaultPolicy(true);
+        data = await hit("/rot/policies");
+      }
       (data.policies || []).forEach(p => {
         const opt = document.createElement("option");
         opt.value = p.id;
@@ -236,6 +246,7 @@
           <td>${o.original_filename || "-"}</td>
           <td>${o.filename || "-"}</td>
           <td>${(Number(o.current_size_bytes || 0) / 1024).toFixed(1)}</td>
+          <td>${o.keep_original_restore ? "yes" : "no"}</td>
           <td><span class="stage s${o.current_stage}">${o.current_stage} (${stageLabel})</span></td>
           <td>${o.deleted}</td>
           <td>${o.legal_hold}</td>
@@ -245,6 +256,7 @@
             <button onclick="toggleNoDecay(${o.id}, ${o.do_not_decay ? "false" : "true"})">${o.do_not_decay ? "Allow Decay" : "No Decay"}</button>
             <button onclick="restore(${o.id})">Restore</button>
             <button onclick="deleteNow(${o.id})">Delete</button>
+            <button onclick="purgeNow(${o.id})">Purge Now</button>
             <button onclick="renameFile(${o.id})">Rename</button>
             <button class="secondary" onclick="openObjectFile(${o.id})">View Data</button>
             <button class="secondary" onclick="inspectFromRow(${o.id})">Inspect</button>
@@ -268,6 +280,7 @@
         let policyId = document.getElementById("policySelect").value;
         const fileInput = document.getElementById("uploadFileInput");
         const file = fileInput.files[0];
+        const keepOriginalRestore = document.getElementById("restoreOriginalToggle").checked;
 
         if (!policyId) {
           await createDefaultPolicy();
@@ -300,7 +313,8 @@
               policy_id: Number(policyId),
               filename: file.name,
               mime_type: file.type,
-              content_base64: base64
+              content_base64: base64,
+              keep_original_restore: keepOriginalRestore
             })
           });
         } catch (e) {
@@ -312,7 +326,8 @@
                 policy_id: Number(policyId),
                 filename: file.name,
                 mime_type: file.type,
-                content_base64: base64
+                content_base64: base64,
+                keep_original_restore: keepOriginalRestore
               })
             });
           } else {
@@ -401,6 +416,23 @@
       }
     }
 
+    async function purgeNow(id) {
+      try {
+        const out = await hit(`/objects/${id}/purge`, { method: "POST" });
+        if (!out.purged) {
+          setStatus(`Purge failed for object ${id}.`);
+          setStatusKind("bad");
+          return;
+        }
+        await refreshAll();
+        setStatus(`Purged storage artifacts for object ${id}.`);
+        setStatusKind("good");
+      } catch (e) {
+        setStatus(`Purge failed: ${e.message}`);
+        setStatusKind("bad");
+      }
+    }
+
     async function inspectState() {
       const id = document.getElementById("inspectId").value;
       if (!id) return;
@@ -438,7 +470,7 @@
       }
     }
 
-    async function createDefaultPolicy() {
+    async function createDefaultPolicy(silent = false) {
       try {
         await hit("/rot/policies", {
           method: "PUT",
@@ -458,12 +490,16 @@
             }
           })
         });
-        await refreshAll();
-        setStatus("Default policy created. You can now create objects.");
-        setStatusKind("good");
+        if (!silent) {
+          await refreshAll();
+          setStatus("Default policy created. You can now create objects.");
+          setStatusKind("good");
+        }
       } catch (e) {
-        setStatus(`Could not create policy: ${e.message}`);
-        setStatusKind("bad");
+        if (!silent) {
+          setStatus(`Could not create policy: ${e.message}`);
+          setStatusKind("bad");
+        }
       }
     }
 

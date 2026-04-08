@@ -44,7 +44,7 @@ class DecayEngineTests(unittest.TestCase):
 
         self.engine.decay_tick(self.tenant_id, now=111)
         state = self.engine.get_state(self.tenant_id, object_id)
-        self.assertEqual(state["current_stage"], 3)
+        self.assertEqual(state["current_stage"], 4)
         self.assertTrue(state["deleted"])
 
     def test_access_refresh_resets_stage(self) -> None:
@@ -71,10 +71,7 @@ class DecayEngineTests(unittest.TestCase):
         self.engine.decay_tick(self.tenant_id, now=211)
         self.assertTrue(self.engine.get_state(self.tenant_id, object_id)["deleted"])
         restored = self.engine.restore_object(self.tenant_id, object_id, now=212)
-        self.assertTrue(restored)
-        state = self.engine.get_state(self.tenant_id, object_id)
-        self.assertFalse(state["deleted"])
-        self.assertEqual(state["current_stage"], 0)
+        self.assertFalse(restored)
 
     def test_restore_after_window_is_degraded(self) -> None:
         short_window_policy = self.engine.add_policy(
@@ -91,10 +88,25 @@ class DecayEngineTests(unittest.TestCase):
         self.engine.decay_tick(self.tenant_id, now=107)
         self.engine.decay_tick(self.tenant_id, now=111)
         restored = self.engine.restore_object(self.tenant_id, object_id, now=120)
+        self.assertFalse(restored)
+
+    def test_keep_original_toggle_allows_restore(self) -> None:
+        object_id = self.engine.create_object(
+            self.tenant_id,
+            "log",
+            "original payload for restore toggle",
+            self.policy_id,
+            now=300,
+            original_filename="note.txt",
+            keep_original_restore=True,
+        )
+        self.engine.decay_tick(self.tenant_id, now=304)
+        self.engine.decay_tick(self.tenant_id, now=307)
+        self.engine.decay_tick(self.tenant_id, now=311)
+        restored = self.engine.restore_object(self.tenant_id, object_id, now=312)
         self.assertTrue(restored)
         state = self.engine.get_state(self.tenant_id, object_id)
-        self.assertFalse(state["deleted"])
-        self.assertEqual(state["current_stage"], 1)
+        self.assertEqual(state["current_stage"], 0)
 
     def test_object_controls_prevent_decay(self) -> None:
         object_id = self.engine.create_object(self.tenant_id, "log", "protected payload", self.policy_id, now=1000)

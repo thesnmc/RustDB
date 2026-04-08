@@ -37,10 +37,18 @@ Objects move through stages:
 - `0 Hot` - original fidelity
 - `1 Warm` - first transform
 - `2 Cold` - stronger transform
-- `3 Deleted` - tombstoned
 - `4 Purged` - artifacts physically removed
 
-`Run Tick` advances eligible objects by one stage.
+### Tick behavior (important)
+
+- `Run Tick` in the dashboard now runs in **force mode**:
+  - it advances objects without waiting for wall-clock `next_decay_at`
+  - this is intentional for easy manual testing/demos
+- per-upload `Decay speed` still applies:
+  - `1.0x` -> one tick usually advances one stage
+  - `0.5x` -> roughly two ticks per stage
+  - `2.0x` -> can advance with progress headroom
+- background scheduler continues to run with normal time-based behavior
 
 ## Deletion and purge model (important)
 
@@ -78,6 +86,7 @@ If enabled:
 - RustDB preserves the original file path for the configured `restore_window_sec`
 - restore within window can return original-format quality
 - other generated artifacts still decay/purge normally
+- in forced manual ticking, delete stage purges original immediately for predictable testing
 
 If disabled:
 
@@ -85,10 +94,12 @@ If disabled:
 
 ## Dashboard usage
 
-1. Connect (`Auto Detect Backend` -> `Test Connection`)
-2. Create default policy once
+1. Open `http://127.0.0.1:8080/admin`
+2. Dashboard auto-detects backend and auto-loads existing objects
 3. Upload file with `Upload Data`
-4. Run decay with `Run Tick`
+   - policy is selected automatically by file type
+   - file input resets after successful upload
+4. Run decay with `Run Tick` (forced manual progression)
 5. Manage rows with:
    - `View Data`
    - `Rename`
@@ -215,6 +226,35 @@ python scripts/smoke_test.py
   - expected if current stage payload is a summary/metadata artifact
 - deleted row still visible
   - uncheck "Show deleted rows" or run refresh
+- `Keep Original column shows no when checked`
+  - restart server so latest API shape is loaded
+  - verify with fresh upload after restart
+- `manual tick needs multiple clicks unexpectedly`
+  - check selected `Decay speed` (for `0.5x`, two ticks per stage is expected)
+
+## Push updates to GitHub (Windows)
+
+Use this exact flow in PowerShell:
+
+```powershell
+git status
+git add decaydb/admin.html decaydb/api.py decaydb/engine.py decaydb/models.py main.py tests/test_decaydb.py README.md
+git commit -m "Polish dashboard lifecycle flow, force tick behavior, and docs"
+git push
+```
+
+If branch has no upstream yet:
+
+```powershell
+git push -u origin HEAD
+```
+
+If Git asks you to pull first:
+
+```powershell
+git pull --rebase
+git push
+```
 
 ## GitHub release files
 

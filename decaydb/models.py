@@ -48,6 +48,8 @@ CREATE TABLE IF NOT EXISTS rot_state (
     do_not_decay INTEGER NOT NULL DEFAULT 0,
     restore_available INTEGER NOT NULL DEFAULT 0,
     deleted_at INTEGER NOT NULL DEFAULT 0,
+    decay_rate REAL NOT NULL DEFAULT 1.0,
+    decay_progress REAL NOT NULL DEFAULT 0.0,
     version INTEGER NOT NULL DEFAULT 1,
     FOREIGN KEY (object_id) REFERENCES object_data(id),
     FOREIGN KEY (policy_id) REFERENCES rot_policy(id)
@@ -93,6 +95,10 @@ def bootstrap(conn: sqlite3.Connection) -> None:
     state_cols = {row[1] for row in conn.execute("PRAGMA table_info(rot_state)").fetchall()}
     if "deleted_at" not in state_cols:
         conn.execute("ALTER TABLE rot_state ADD COLUMN deleted_at INTEGER NOT NULL DEFAULT 0")
+    if "decay_rate" not in state_cols:
+        conn.execute("ALTER TABLE rot_state ADD COLUMN decay_rate REAL NOT NULL DEFAULT 1.0")
+    if "decay_progress" not in state_cols:
+        conn.execute("ALTER TABLE rot_state ADD COLUMN decay_progress REAL NOT NULL DEFAULT 0.0")
     object_cols = {row[1] for row in conn.execute("PRAGMA table_info(object_data)").fetchall()}
     if "original_filename" not in object_cols:
         conn.execute("ALTER TABLE object_data ADD COLUMN original_filename TEXT NOT NULL DEFAULT ''")

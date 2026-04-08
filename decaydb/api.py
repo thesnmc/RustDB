@@ -261,6 +261,7 @@ class DecayApiHandler(BaseHTTPRequestHandler):
                 filename = data["filename"]
                 mime_type = data.get("mime_type")
                 keep_original_restore = bool(data.get("keep_original_restore", False))
+                decay_rate = float(data.get("decay_rate", 1.0))
                 stored_path = save_binary(filename, raw)
                 record_type = self._infer_record_type(filename, mime_type)
                 object_id = self.engine.create_object(
@@ -270,6 +271,7 @@ class DecayApiHandler(BaseHTTPRequestHandler):
                     policy_id=policy_id,
                     original_filename=filename,
                     keep_original_restore=keep_original_restore,
+                    decay_rate=decay_rate,
                 )
                 self._json(201, {"object_id": object_id, "record_type": record_type, "stored_path": stored_path})
                 return
@@ -295,6 +297,7 @@ class DecayApiHandler(BaseHTTPRequestHandler):
                 mime_type = data.get("mime_type")
                 policy_id = int(data["policy_id"])
                 keep_original_restore = bool(data.get("keep_original_restore", False))
+                decay_rate = float(data.get("decay_rate", 1.0))
             except (json.JSONDecodeError, KeyError, ValueError, binascii.Error):
                 self._json(400, {"error": "invalid_upload_payload"})
                 return
@@ -307,11 +310,21 @@ class DecayApiHandler(BaseHTTPRequestHandler):
                 policy_id=policy_id,
                 original_filename=filename,
                 keep_original_restore=keep_original_restore,
+                decay_rate=decay_rate,
             )
             self._json(201, {"object_id": object_id, "record_type": record_type, "stored_path": stored_path})
             return
         if route == "/rot/run":
-            changed = self.engine.decay_tick(tenant_id=tenant_id)
+            force = False
+            length = int(self.headers.get("Content-Length", "0"))
+            if length > 0:
+                try:
+                    data = json.loads(self.rfile.read(length))
+                    force = bool(data.get("force", False))
+                except json.JSONDecodeError:
+                    self._json(400, {"error": "invalid_json"})
+                    return
+            changed = self.engine.decay_tick(tenant_id=tenant_id, force=force)
             self._json(200, {"changed": changed})
             return
         if route.startswith("/rot/restore/"):

@@ -116,6 +116,7 @@ class DecayEngine:
         now: Optional[int] = None,
         original_filename: str = "",
         keep_original_restore: bool = False,
+        decay_rate: float = 1.0,
     ) -> int:
         now = now or int(time.time())
         cur = self.conn.execute(
@@ -141,10 +142,10 @@ class DecayEngine:
             """
             INSERT INTO rot_state (
                 object_id, policy_id, last_access_at, current_stage, next_decay_at, fidelity_score,
-                legal_hold, do_not_decay, restore_available, deleted_at, version
-            ) VALUES (?, ?, ?, 0, ?, 1.0, ?, 0, 1, 0, 1)
+                legal_hold, do_not_decay, restore_available, deleted_at, decay_rate, decay_progress, version
+            ) VALUES (?, ?, ?, 0, ?, 1.0, ?, 0, 1, 0, ?, 0.0, 1)
             """,
-            (object_id, policy_id, now, next_decay_at, int(policy["legal_hold_default"])),
+            (object_id, policy_id, now, next_decay_at, int(policy["legal_hold_default"]), float(max(decay_rate, 0.1))),
         )
         self._save_artifact(object_id, 0, "origin", payload, now)
         self._audit(object_id, "create", f"stage=0 next_decay_at={next_decay_at}", now)
@@ -173,26 +174,35 @@ class DecayEngine:
         ).fetchone()
 
     def decay_tick(
-        self, tenant_id: str, now: Optional[int] = None, limit: int = 50, shadow_mode: bool = False
+        self,
+        tenant_id: str,
+        now: Optional[int] = None,
+        limit: int = 50,
+        shadow_mode: bool = False,
+        force: bool = False,
     ) -> int:
         now = now or int(time.time())
+        expired_originals_purged = (
+            0 if shadow_mode else self._purge_expired_original_restore_files(tenant_id, now, limit, force=force)
+        )
         candidates = self.conn.execute(
             """
             SELECT s.object_id, s.policy_id, s.current_stage, s.last_access_at, s.version, s.legal_hold,
-                   s.do_not_decay, d.record_type, d.payload, d.created_at
+                   s.do_not_decay, s.decay_rate, s.decay_progress, d.record_type, d.payload, d.created_at
             FROM rot_state s
             JOIN object_data d ON d.id = s.object_id
-            WHERE s.next_decay_at <= ? AND d.tenant_id = ?
+            WHERE (s.next_decay_at <= ? OR ? = 1) AND d.tenant_id = ? AND d.deleted = 0
             ORDER BY s.next_decay_at ASC
             LIMIT ?
             """,
-            (now, tenant_id, limit),
+            (now, int(force), tenant_id, limit),
         ).fetchall()
 
         changed = 0
         for row in candidates:
-            if self._apply_next_stage(tenant_id, row, now, shadow_mode=shadow_mode):
+            if self._apply_next_stage(tenant_id, row, now, shadow_mode=shadow_mode, force=force):
                 changed += 1
+        changed += expired_originals_purged
         self._metric(tenant_id, "decay_tick_changed", float(changed), now)
         self.conn.commit()
         return changed
@@ -201,7 +211,7 @@ class DecayEngine:
         return self.conn.execute(
             """
             SELECT d.id, d.record_type, d.payload, d.deleted, s.current_stage, s.fidelity_score, s.next_decay_at,
-                   s.legal_hold, s.do_not_decay
+                   s.legal_hold, s.do_not_decay, d.original_filename, d.keep_original_restore
             FROM object_data d
             JOIN rot_state s ON s.object_id = d.id
             WHERE d.tenant_id = ?
@@ -364,7 +374,10 @@ class DecayEngine:
         )
         self._purge_files_for_object(object_id)
         self.conn.execute("DELETE FROM rot_artifact WHERE object_id = ?", (object_id,))
-        self.conn.execute("UPDATE object_data SET deleted = 1, payload = '[purged]' WHERE id = ?", (object_id,))
+        self.conn.execute(
+            "UPDATE object_data SET deleted = 1, payload = '[purged]', original_payload = '' WHERE id = ?",
+            (object_id,),
+        )
         self._audit(object_id, "delete", "forced_delete_and_purge", now)
         self._metric(tenant_id, "delete_count", 1.0, now)
         self._metric(tenant_id, "purge_count", 1.0, now)
@@ -414,7 +427,10 @@ class DecayEngine:
             """,
             (now + 315360000, object_id, int(row["version"])),
         )
-        self.conn.execute("UPDATE object_data SET payload = '[purged]', deleted = 1 WHERE id = ?", (object_id,))
+        self.conn.execute(
+            "UPDATE object_data SET payload = '[purged]', deleted = 1, original_payload = '' WHERE id = ?",
+            (object_id,),
+        )
         self._audit(object_id, "purge_files", "forced_purge_now", now)
         self._metric(tenant_id, "purge_count", 1.0, now)
         self.conn.commit()
@@ -444,12 +460,16 @@ class DecayEngine:
         self._audit(object_id, "access_refresh", f"reset_to_stage=0 next_decay_at={next_decay_at}", now)
         self._metric(tenant_id, "refresh_count", 1.0, now)
 
-    def _apply_next_stage(self, tenant_id: str, row: sqlite3.Row, now: int, shadow_mode: bool) -> bool:
+    def _apply_next_stage(
+        self, tenant_id: str, row: sqlite3.Row, now: int, shadow_mode: bool, force: bool = False
+    ) -> bool:
         policy = self.conn.execute("SELECT * FROM rot_policy WHERE id = ?", (row["policy_id"],)).fetchone()
         object_id = int(row["object_id"])
         current_stage = int(row["current_stage"])
         last_access_at = int(row["last_access_at"])
         original_version = int(row["version"])
+        decay_rate = float(row["decay_rate"])
+        decay_progress = float(row["decay_progress"])
         created_at = int(row["created_at"])
         payload = str(row["payload"])
         record_type = str(row["record_type"])
@@ -465,6 +485,27 @@ class DecayEngine:
         if now - created_at < int(policy["min_retention_sec"]):
             self._audit(object_id, "decay_skipped", "min_retention", now)
             return False
+
+        # Per-object decay speed multiplier:
+        # 1.0 -> normal (one tick can progress one stage)
+        # 0.5 -> needs ~2 ticks for one stage
+        # 2.0 -> can progress each tick with headroom
+        next_progress = decay_progress + max(decay_rate, 0.1)
+        if next_progress < 1.0:
+            updated = self.conn.execute(
+                """
+                UPDATE rot_state
+                SET decay_progress = ?, next_decay_at = ?, version = version + 1
+                WHERE object_id = ? AND version = ?
+                """,
+                (next_progress, now + 1, object_id, original_version),
+            )
+            if updated.rowcount == 0:
+                return False
+            self._audit(object_id, "decay_progress", f"progress={next_progress:.2f}", now)
+            return True
+        # Consume one progression unit for this stage transition.
+        carry_progress = next_progress - 1.0
 
         if current_stage == 0:
             old_payload = payload
@@ -487,10 +528,10 @@ class DecayEngine:
             updated = self.conn.execute(
                 """
                 UPDATE rot_state
-                SET current_stage = 1, next_decay_at = ?, fidelity_score = 0.6, version = version + 1
+                SET current_stage = 1, next_decay_at = ?, fidelity_score = 0.6, decay_progress = ?, version = version + 1
                 WHERE object_id = ? AND version = ?
                 """,
-                (next_decay_at, object_id, original_version),
+                (next_decay_at, carry_progress, object_id, original_version),
             )
             if updated.rowcount == 0:
                 return False
@@ -531,10 +572,10 @@ class DecayEngine:
             updated = self.conn.execute(
                 """
                 UPDATE rot_state
-                SET current_stage = 2, next_decay_at = ?, fidelity_score = 0.2, version = version + 1
+                SET current_stage = 2, next_decay_at = ?, fidelity_score = 0.2, decay_progress = ?, version = version + 1
                 WHERE object_id = ? AND version = ?
                 """,
-                (next_decay_at, object_id, original_version),
+                (next_decay_at, carry_progress, object_id, original_version),
             )
             if updated.rowcount == 0:
                 return False
@@ -549,19 +590,21 @@ class DecayEngine:
             updated = self.conn.execute(
                 """
                 UPDATE rot_state
-                SET current_stage = 4, next_decay_at = ?, deleted_at = ?, fidelity_score = 0.0, restore_available = 0, version = version + 1
+                SET current_stage = 4, next_decay_at = ?, deleted_at = ?, fidelity_score = 0.0, restore_available = 0,
+                    decay_progress = ?, version = version + 1
                 WHERE object_id = ? AND version = ?
                 """,
                 (
                     now + 315360000,
                     now,
+                    carry_progress,
                     object_id,
                     original_version,
                 ),
             )
             if updated.rowcount == 0:
                 return False
-            if keep_original_restore:
+            if keep_original_restore and not force:
                 # Keep original payload for limited full-quality restore window.
                 self._purge_files_for_object(object_id, protected_original=original_payload)
                 self.conn.execute("DELETE FROM rot_artifact WHERE object_id = ?", (object_id,))
@@ -571,8 +614,14 @@ class DecayEngine:
                 # Single-copy mode: delete files immediately when reaching delete stage.
                 self._purge_files_for_object(object_id)
                 self.conn.execute("DELETE FROM rot_artifact WHERE object_id = ?", (object_id,))
-                self.conn.execute("UPDATE object_data SET deleted = 1, payload = '[purged]' WHERE id = ?", (object_id,))
-                self._audit(object_id, "delete", "hard_delete_and_purge_applied", now)
+                self.conn.execute(
+                    "UPDATE object_data SET deleted = 1, payload = '[purged]', original_payload = '' WHERE id = ?",
+                    (object_id,),
+                )
+                if keep_original_restore and force:
+                    self._audit(object_id, "delete", "hard_delete_and_force_purge_applied", now)
+                else:
+                    self._audit(object_id, "delete", "hard_delete_and_purge_applied", now)
             self._metric(tenant_id, "delete_count", 1.0, now)
             self._metric(tenant_id, "purge_count", 1.0, now)
             return True
@@ -616,9 +665,10 @@ class DecayEngine:
         rows = self.conn.execute("SELECT content FROM rot_artifact WHERE object_id = ?", (object_id,)).fetchall()
         for row in rows:
             candidates.add(str(row["content"]))
-        current = self.conn.execute("SELECT payload FROM object_data WHERE id = ?", (object_id,)).fetchone()
+        current = self.conn.execute("SELECT payload, original_payload FROM object_data WHERE id = ?", (object_id,)).fetchone()
         if current:
             candidates.add(str(current["payload"]))
+            candidates.add(str(current["original_payload"]))
 
         for value in candidates:
             if protected_original and value == protected_original:
@@ -649,6 +699,43 @@ class DecayEngine:
             return
         keep_id = int(row["id"])
         self.conn.execute("DELETE FROM rot_artifact WHERE object_id = ? AND id <> ?", (object_id, keep_id))
+
+    def _purge_expired_original_restore_files(self, tenant_id: str, now: int, limit: int, force: bool = False) -> int:
+        base_sql = """
+            SELECT d.id AS object_id, d.original_payload, s.deleted_at, p.restore_window_sec
+            FROM object_data d
+            JOIN rot_state s ON s.object_id = d.id
+            JOIN rot_policy p ON p.id = s.policy_id
+            WHERE d.tenant_id = ?
+              AND s.current_stage >= 4
+              AND d.keep_original_restore = 1
+              AND s.deleted_at > 0
+              AND d.original_payload <> ''
+        """
+        if force:
+            rows = self.conn.execute(
+                base_sql + " ORDER BY s.deleted_at ASC LIMIT ?",
+                (tenant_id, limit),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                base_sql + " AND (? - s.deleted_at) >= p.restore_window_sec ORDER BY s.deleted_at ASC LIMIT ?",
+                (tenant_id, now, limit),
+            ).fetchall()
+        purged = 0
+        for row in rows:
+            object_id = int(row["object_id"])
+            original_payload = str(row["original_payload"])
+            if os.path.exists(original_payload):
+                try:
+                    os.remove(original_payload)
+                except OSError:
+                    pass
+            self.conn.execute("UPDATE object_data SET original_payload = '' WHERE id = ?", (object_id,))
+            self._audit(object_id, "purge_original", "restore_window_expired", now)
+            self._metric(tenant_id, "purge_count", 1.0, now)
+            purged += 1
+        return purged
 
     def metrics_summary(self, tenant_id: str) -> dict:
         rows = self.conn.execute(

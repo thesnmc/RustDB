@@ -1,7 +1,9 @@
 # TheSNMC RustDB tests
 from __future__ import annotations
 
+import os
 import sqlite3
+import tempfile
 import unittest
 
 from decaydb.engine import DecayEngine
@@ -107,6 +109,109 @@ class DecayEngineTests(unittest.TestCase):
         self.assertTrue(restored)
         state = self.engine.get_state(self.tenant_id, object_id)
         self.assertEqual(state["current_stage"], 0)
+
+    def test_decay_rate_half_requires_two_ticks_per_stage(self) -> None:
+        object_id = self.engine.create_object(
+            self.tenant_id,
+            "log",
+            "slow decay payload",
+            self.policy_id,
+            now=400,
+            decay_rate=0.5,
+        )
+        self.engine.decay_tick(self.tenant_id, now=404)
+        state = self.engine.get_state(self.tenant_id, object_id)
+        self.assertEqual(state["current_stage"], 0)
+        self.engine.decay_tick(self.tenant_id, now=405)
+        state = self.engine.get_state(self.tenant_id, object_id)
+        self.assertEqual(state["current_stage"], 1)
+
+    def test_keep_original_file_purges_after_restore_window(self) -> None:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".txt") as tmp:
+            tmp.write(b"original bytes")
+            original_path = tmp.name
+        try:
+            object_id = self.engine.create_object(
+                self.tenant_id,
+                "log",
+                original_path,
+                self.policy_id,
+                now=500,
+                original_filename="sample.txt",
+                keep_original_restore=True,
+            )
+            self.engine.decay_tick(self.tenant_id, now=504)
+            self.engine.decay_tick(self.tenant_id, now=507)
+            self.engine.decay_tick(self.tenant_id, now=511)
+            self.assertTrue(self.engine.get_state(self.tenant_id, object_id)["deleted"])
+            self.assertTrue(os.path.exists(original_path))
+
+            # Window for this policy is 120s; after expiry, kept original should be purged.
+            self.engine.decay_tick(self.tenant_id, now=700)
+            self.assertFalse(os.path.exists(original_path))
+        finally:
+            if os.path.exists(original_path):
+                os.remove(original_path)
+
+    def test_expired_original_purge_works_even_if_deleted_flag_mismatch(self) -> None:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".txt") as tmp:
+            tmp.write(b"original bytes")
+            original_path = tmp.name
+        try:
+            object_id = self.engine.create_object(
+                self.tenant_id,
+                "log",
+                original_path,
+                self.policy_id,
+                now=800,
+                original_filename="sample.txt",
+                keep_original_restore=True,
+            )
+            self.engine.decay_tick(self.tenant_id, now=804)
+            self.engine.decay_tick(self.tenant_id, now=807)
+            self.engine.decay_tick(self.tenant_id, now=811)
+            # Simulate stale/incorrect object_data.deleted flag while stage is already terminal.
+            self.conn.execute("UPDATE object_data SET deleted = 0 WHERE id = ?", (object_id,))
+            self.conn.commit()
+            self.engine.decay_tick(self.tenant_id, now=950)
+            self.assertFalse(os.path.exists(original_path))
+        finally:
+            if os.path.exists(original_path):
+                os.remove(original_path)
+
+    def test_force_tick_advances_without_waiting_for_wall_time(self) -> None:
+        object_id = self.engine.create_object(
+            self.tenant_id,
+            "log",
+            "force tick payload",
+            self.policy_id,
+            now=1000,
+        )
+        self.engine.decay_tick(self.tenant_id, now=1000, force=True)
+        state = self.engine.get_state(self.tenant_id, object_id)
+        self.assertEqual(state["current_stage"], 1)
+
+    def test_force_tick_purges_kept_original_after_delete(self) -> None:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".txt") as tmp:
+            tmp.write(b"original bytes")
+            original_path = tmp.name
+        try:
+            object_id = self.engine.create_object(
+                self.tenant_id,
+                "log",
+                original_path,
+                self.policy_id,
+                now=1100,
+                original_filename="sample.txt",
+                keep_original_restore=True,
+            )
+            self.engine.decay_tick(self.tenant_id, now=1100, force=True)  # stage 1
+            self.engine.decay_tick(self.tenant_id, now=1100, force=True)  # stage 2
+            self.engine.decay_tick(self.tenant_id, now=1100, force=True)  # delete stage
+            self.assertFalse(os.path.exists(original_path))
+        finally:
+            if os.path.exists(original_path):
+                os.remove(original_path)
 
     def test_object_controls_prevent_decay(self) -> None:
         object_id = self.engine.create_object(self.tenant_id, "log", "protected payload", self.policy_id, now=1000)

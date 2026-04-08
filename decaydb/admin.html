@@ -42,6 +42,11 @@
       <button onclick="refreshAll()">Refresh</button>
       <button onclick="runTick()">Run Tick</button>
       <button class="secondary" onclick="toggleAutoRefresh()" id="autoBtn">Auto Refresh Off</button>
+      <label class="muted">Auto tick
+        <input id="autoTickSec" type="number" min="1" step="1" value="3" style="width:64px" />
+        sec
+      </label>
+      <button class="secondary" onclick="toggleAutoTick()" id="autoTickBtn">Auto Tick Off</button>
       <span class="pill" id="statusPill">Idle</span>
       <span class="muted" id="status">Ready to connect.</span>
     </div>
@@ -59,10 +64,16 @@
 
   <div class="card">
     <h2>Step 2 - Create Data</h2>
-    <div class="help">Pick any file and click Upload Data. RustDB auto-detects type and decay path.</div>
+    <div class="help">Pick any file and click Upload Data. RustDB now auto-picks the best policy by file type.</div>
     <div class="row">
-      <select id="policySelect"></select>
       <input type="file" id="uploadFileInput" />
+      <label class="muted">Decay speed:
+        <select id="decayRateSelect">
+          <option value="0.5">0.5x</option>
+          <option value="1.0" selected>1.0x</option>
+          <option value="2.0">2.0x</option>
+        </select>
+      </label>
       <label class="muted"><input type="checkbox" id="restoreOriginalToggle" /> Keep original for full restore window</label>
       <button onclick="uploadOnly()">Upload Data</button>
     </div>
@@ -96,6 +107,9 @@
 
   <script>
     let autoTimer = null;
+    let autoTickTimer = null;
+    let cachedPolicies = [];
+    let uploadInProgress = false;
 
     function normalizeApiBase(raw) {
       let v = (raw || "").trim();
@@ -217,18 +231,34 @@
 
     async function loadPolicies() {
       let data = await hit("/rot/policies");
-      const sel = document.getElementById("policySelect");
-      sel.innerHTML = "";
       if (!data.policies || data.policies.length === 0) {
         await createDefaultPolicy(true);
         data = await hit("/rot/policies");
       }
-      (data.policies || []).forEach(p => {
-        const opt = document.createElement("option");
-        opt.value = p.id;
-        opt.textContent = `${p.id} - ${p.name} (${p.record_type})`;
-        sel.appendChild(opt);
-      });
+      cachedPolicies = data.policies || [];
+    }
+
+    function inferUploadRecordType(file) {
+      const name = (file?.name || "").toLowerCase();
+      const mime = (file?.type || "").toLowerCase();
+      if (mime.startsWith("image/") || /\.(png|jpg|jpeg|webp|gif|bmp|tif|tiff)$/i.test(name)) return "image_file";
+      if (/\.(csv|xlsx|xlsm|xls)$/i.test(name)) return "spreadsheet_file";
+      if (/\.(pdf)$/i.test(name)) return "pdf_file";
+      if (/\.(doc|docx|ppt|pptx)$/i.test(name)) return "document_file";
+      if (mime.startsWith("text/") || /\.(txt|md|json|xml|yaml|yml|log)$/i.test(name)) return "text_file";
+      return "binary_file";
+    }
+
+    async function resolvePolicyIdForFile(file) {
+      if (!cachedPolicies.length) await loadPolicies();
+      const targetType = inferUploadRecordType(file);
+      const exact = cachedPolicies.find(p => p.record_type === targetType);
+      if (exact) return Number(exact.id);
+      const fallback = cachedPolicies.find(p => p.record_type === "log") || cachedPolicies[0];
+      if (fallback) return Number(fallback.id);
+      await createDefaultPolicy(true);
+      await loadPolicies();
+      return cachedPolicies.length ? Number(cachedPolicies[0].id) : 0;
     }
 
     async function loadObjects() {
@@ -269,30 +299,36 @@
     async function runTick() {
       setStatus("Running decay tick...");
       setStatusKind("warn");
-      await hit("/rot/run", { method: "POST" });
+      await hit("/rot/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ force: true })
+      });
       await refreshAll();
       setStatus("Tick complete");
       setStatusKind("good");
     }
 
     async function uploadOnly(retry = true) {
+      if (uploadInProgress) {
+        setStatus("Upload already in progress...");
+        setStatusKind("warn");
+        return;
+      }
+      uploadInProgress = true;
       try {
-        let policyId = document.getElementById("policySelect").value;
         const fileInput = document.getElementById("uploadFileInput");
         const file = fileInput.files[0];
         const keepOriginalRestore = document.getElementById("restoreOriginalToggle").checked;
-
-        if (!policyId) {
-          await createDefaultPolicy();
-          policyId = document.getElementById("policySelect").value;
-        }
-        if (!policyId) {
-          setStatus("Could not find/create a policy. Check backend and API key.");
+        const decayRate = Number(document.getElementById("decayRateSelect").value || "1.0");
+        if (!file) {
+          setStatus("Choose a file first.");
           setStatusKind("bad");
           return;
         }
-        if (!file) {
-          setStatus("Choose a file first.");
+        const policyId = await resolvePolicyIdForFile(file);
+        if (!policyId) {
+          setStatus("Could not find/create a policy. Check backend and API key.");
           setStatusKind("bad");
           return;
         }
@@ -314,7 +350,8 @@
               filename: file.name,
               mime_type: file.type,
               content_base64: base64,
-              keep_original_restore: keepOriginalRestore
+              keep_original_restore: keepOriginalRestore,
+              decay_rate: decayRate
             })
           });
         } catch (e) {
@@ -327,7 +364,8 @@
                 filename: file.name,
                 mime_type: file.type,
                 content_base64: base64,
-                keep_original_restore: keepOriginalRestore
+                keep_original_restore: keepOriginalRestore,
+                decay_rate: decayRate
               })
             });
           } else {
@@ -335,6 +373,7 @@
           }
         }
         await refreshAll();
+        fileInput.value = "";
         setStatus(`Created object ${result.object_id} as ${result.record_type}.`);
         setStatusKind("good");
       } catch (e) {
@@ -350,6 +389,8 @@
           setStatus(`Create failed: ${e.message}`);
         }
         setStatusKind("bad");
+      } finally {
+        uploadInProgress = false;
       }
     }
 
@@ -519,9 +560,31 @@
       setStatusKind("good");
     }
 
+    function toggleAutoTick() {
+      const btn = document.getElementById("autoTickBtn");
+      if (autoTickTimer) {
+        clearInterval(autoTickTimer);
+        autoTickTimer = null;
+        btn.textContent = "Auto Tick Off";
+        setStatus("Auto tick disabled.");
+        setStatusKind("warn");
+        return;
+      }
+      const sec = Math.max(1, Number(document.getElementById("autoTickSec").value || "3"));
+      autoTickTimer = setInterval(() => {
+        runTick().catch(() => {});
+      }, sec * 1000);
+      btn.textContent = "Auto Tick On";
+      setStatus(`Auto tick enabled (every ${sec}s).`);
+      setStatusKind("good");
+    }
+
     if (window.location.protocol === "file:") {
       document.getElementById("apiBase").value = "http://127.0.0.1:8080";
-      setStatus("Opened as file. Set API URL and click Test Connection.");
+      setStatus("Opened as file. Auto-connecting to local backend...");
+      autoDetectBackend().catch(() => {}).finally(() => {
+        refreshAll().catch(() => {});
+      });
     } else {
       document.getElementById("apiBase").value = window.location.origin;
       refreshAll();

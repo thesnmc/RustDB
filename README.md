@@ -20,6 +20,13 @@ It ingests files and records, tracks heat/fidelity, applies staged transforms, a
 .\start_local.ps1
 ```
 
+`start_local.ps1` is one-command bootstrap:
+
+- auto-detects Python (`py` or `python`)
+- creates `.venv` on first run
+- installs/updates dependencies from `requirements.txt`
+- launches the API at `127.0.0.1:8080`
+
 Open `http://127.0.0.1:8080/admin` and use API key `devkey`.
 
 ### Docker stack

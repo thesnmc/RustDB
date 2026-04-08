@@ -1,0 +1,26 @@
+{
+  "publisher": "TheSNMC",
+  "phase": 1,
+  "phases": {
+    "1": {
+      "name": "shadow_mode",
+      "shadow_mode": true,
+      "allow_deletes": false
+    },
+    "2": {
+      "name": "non_destructive_transforms",
+      "shadow_mode": false,
+      "allow_deletes": false
+    },
+    "3": {
+      "name": "deletion_enabled_with_grace",
+      "shadow_mode": false,
+      "allow_deletes": true
+    },
+    "4": {
+      "name": "tightened_thresholds",
+      "shadow_mode": false,
+      "allow_deletes": true
+    }
+  }
+}

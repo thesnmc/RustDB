@@ -1,0 +1,3 @@
+# TheSNMC RustDB dependencies
+psycopg[binary]
+Pillow

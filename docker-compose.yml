@@ -1,0 +1,42 @@
+# TheSNMC RustDB local docker stack
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: rustdb
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  api:
+    build: .
+    command: python main_postgres.py
+    environment:
+      RUSTDB_PG_DSN: postgresql://postgres:postgres@postgres:5432/rustdb
+      RUSTDB_API_KEYS: devkey:default,tenantbkey:tenant_b
+      RUSTDB_TENANT: default
+    ports:
+      - "8081:8081"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  worker:
+    build: .
+    command: python worker_postgres.py
+    environment:
+      RUSTDB_PG_DSN: postgresql://postgres:postgres@postgres:5432/rustdb
+      RUSTDB_TICK_INTERVAL_SEC: "1.0"
+      RUSTDB_SHADOW_MODE: "0"
+      RUSTDB_TENANT: default
+    depends_on:
+      postgres:
+        condition: service_healthy

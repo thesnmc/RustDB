@@ -1,0 +1,496 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>TheSNMC RustDB Dashboard</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px; background: #f8fafc; color: #0f172a; }
+    h1 { margin-bottom: 6px; }
+    h2 { margin: 0 0 10px 0; font-size: 18px; }
+    h3 { margin: 0 0 8px 0; }
+    .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+    .card { background: #fff; border: 1px solid #dbe3ef; border-radius: 10px; padding: 12px; margin-bottom: 12px; }
+    .grid { display: grid; grid-template-columns: repeat(3, minmax(180px, 1fr)); gap: 10px; }
+    .metric { background: #fff; border: 1px solid #dbe3ef; border-radius: 10px; padding: 10px; }
+    .metric .k { font-size: 12px; color: #475569; }
+    .metric .v { font-size: 20px; font-weight: 700; margin-top: 2px; }
+    table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+    th, td { border-bottom: 1px solid #e2e8f0; text-align: left; padding: 8px; font-size: 14px; }
+    th { font-size: 12px; color: #475569; text-transform: uppercase; letter-spacing: .04em; }
+    input, select, button { padding: 8px 10px; border: 1px solid #cbd5e1; border-radius: 8px; }
+    button { cursor: pointer; background: #0ea5e9; color: #fff; border: 0; }
+    button.secondary { background: #475569; }
+    .stage { font-weight: 700; }
+    .s0 { color: #0f766e; } .s1 { color: #2563eb; } .s2 { color: #d97706; } .s3 { color: #dc2626; }
+    .muted { color: #64748b; font-size: 12px; }
+    .good { color: #047857; font-weight: 600; }
+    .warn { color: #b45309; font-weight: 600; }
+    .bad { color: #b91c1c; font-weight: 600; }
+    .pill { background: #e2e8f0; border-radius: 999px; padding: 3px 9px; font-size: 12px; }
+    .help { background: #eff6ff; border: 1px solid #bfdbfe; padding: 8px 10px; border-radius: 8px; font-size: 13px; color: #1e3a8a; margin-bottom: 8px; }
+    pre { background: #0f172a; color: #e2e8f0; padding: 10px; border-radius: 8px; overflow: auto; max-height: 240px; }
+  </style>
+</head>
+<body>
+  <h1>TheSNMC RustDB Dashboard</h1>
+  <div class="muted">Simple mode: connect, add data, age data, and inspect history.</div>
+
+  <div class="card">
+    <h2>Step 1 - Connect</h2>
+    <div class="help">If this is your first run, click <b>Auto Detect Backend</b>, then <b>Test Connection</b>.</div>
+    <div class="row">
+      <input id="apiBase" placeholder="Server address (example: http://127.0.0.1:8080)" value="" style="min-width:320px" />
+      <input id="apiKey" placeholder="Access key" value="devkey" />
+      <button class="secondary" onclick="testConnection()">Test Connection</button>
+      <button class="secondary" onclick="autoDetectBackend()">Auto Detect Backend</button>
+      <button class="secondary" onclick="createDefaultPolicy()">Create Default Policy</button>
+      <button onclick="refreshAll()">Refresh</button>
+      <button onclick="runTick()">Run Tick</button>
+      <button class="secondary" onclick="toggleAutoRefresh()" id="autoBtn">Auto Refresh Off</button>
+      <span class="pill" id="statusPill">Idle</span>
+      <span class="muted" id="status">Ready to connect.</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Step 2 - Create Data</h2>
+    <div class="help">Pick any file and click Upload Data. RustDB auto-detects type and decay path.</div>
+    <div class="row">
+      <select id="policySelect"></select>
+      <input type="file" id="uploadFileInput" />
+      <button onclick="uploadOnly()">Upload Data</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Step 3 - Age and Control Data</h2>
+    <div class="help">Click <b>Run Tick</b> to age all eligible data once. Use Hold/No Decay to protect items.</div>
+    <div class="row">
+      <label class="muted"><input type="checkbox" id="showDeletedToggle" /> Show deleted rows</label>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>ID</th><th>Type</th><th>Original Name</th><th>Current Name</th><th>Size (KB)</th><th>Stage</th><th>Deleted</th><th>Hold</th><th>No Decay</th><th>Actions</th>
+        </tr>
+      </thead>
+      <tbody id="objectsBody"></tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>Step 4 - Inspect One Object</h2>
+    <h3>Object State</h3>
+    <div class="row">
+      <input id="inspectId" placeholder="Object ID to inspect" />
+      <button onclick="inspectState()">Inspect Object</button>
+    </div>
+    <pre id="stateOut"></pre>
+  </div>
+
+  <script>
+    let autoTimer = null;
+
+    function normalizeApiBase(raw) {
+      let v = (raw || "").trim();
+      v = v.replace(/^['"]+|['"]+$/g, ""); // remove accidental quotes
+      v = v.replace(/\s+/g, ""); // remove accidental spaces
+      if (!v) return "";
+      if (!/^https?:\/\//i.test(v)) v = `http://${v}`;
+      try {
+        const u = new URL(v);
+        return `${u.protocol}//${u.host}`;
+      } catch (_) {
+        return "";
+      }
+    }
+
+    function apiBase() {
+      const entered = document.getElementById("apiBase").value;
+      const normalized = normalizeApiBase(entered);
+      if (normalized) {
+        document.getElementById("apiBase").value = normalized;
+        return normalized;
+      }
+      if (window.location.protocol !== "file:") return window.location.origin;
+      return "";
+    }
+
+    async function hit(path, opts = {}) {
+      const key = document.getElementById("apiKey").value;
+      const headers = { "X-API-Key": key, ...(opts.headers || {}) };
+      const base = apiBase();
+      if (!base) throw new Error("invalid_api_url");
+      let res;
+      try {
+        res = await fetch(`${base}${path}`, { ...opts, headers });
+      } catch (_) {
+        throw new Error("network_unreachable");
+      }
+      const text = await res.text();
+      let data = text;
+      try { data = JSON.parse(text); } catch (_) {}
+      if (!res.ok) {
+        if (res.status === 401) throw new Error("unauthorized_api_key");
+        if (res.status === 404) throw new Error("endpoint_not_found");
+        throw new Error(typeof data === "string" ? data : JSON.stringify(data));
+      }
+      return data;
+    }
+
+    async function openObjectFile(id) {
+      const base = apiBase();
+      const key = document.getElementById("apiKey").value;
+      const previewTab = window.open("", "_blank");
+      if (!previewTab) {
+        setStatus("Popup blocked. Allow popups for this page, then click View Data again.");
+        setStatusKind("bad");
+        return;
+      }
+      previewTab.document.body.innerHTML = "<p style='font-family:Arial;padding:12px'>Loading...</p>";
+      try {
+        const res = await fetch(`${base}/objects/${id}/file`, { headers: { "X-API-Key": key } });
+        if (!res.ok) {
+          const t = await res.text();
+          previewTab.document.body.innerHTML = `<pre style="font-family:Arial;padding:12px;white-space:pre-wrap">${t}</pre>`;
+          setStatus(`View data failed for object ${id}.`);
+          setStatusKind("bad");
+          return;
+        }
+        const blob = await res.blob();
+        const objectUrl = URL.createObjectURL(blob);
+        previewTab.location.replace(objectUrl);
+        setStatus(`Opened data for object ${id} in new tab.`);
+        setStatusKind("good");
+      } catch (e) {
+        previewTab.document.body.innerHTML = `<pre style="font-family:Arial;padding:12px;white-space:pre-wrap">${String(e.message)}</pre>`;
+        setStatus(`View data failed: ${e.message}`);
+        setStatusKind("bad");
+      }
+    }
+
+    function setStatus(msg) {
+      document.getElementById("status").textContent = msg;
+    }
+    function setStatusKind(kind) {
+      const el = document.getElementById("statusPill");
+      el.className = "pill " + (kind || "");
+    }
+
+    async function testConnection() {
+      try {
+        const base = apiBase();
+        if (!base) throw new Error("invalid");
+        const res = await fetch(`${base}/healthz`);
+        if (!res.ok) throw new Error(`healthz returned ${res.status}`);
+        setStatus(`Connected to ${base}`);
+        setStatusKind("good");
+      } catch (e) {
+        setStatus("Cannot reach backend. Use Auto Detect or set http://127.0.0.1:8080");
+        setStatusKind("bad");
+      }
+    }
+
+    async function autoDetectBackend() {
+      const candidates = ["http://127.0.0.1:8080", "http://127.0.0.1:8081"];
+      for (const c of candidates) {
+        try {
+          const r = await fetch(`${c}/healthz`);
+          if (r.ok) {
+            document.getElementById("apiBase").value = c;
+            setStatus(`Detected backend at ${c}`);
+            setStatusKind("good");
+            await refreshAll();
+            return;
+          }
+        } catch (_) {}
+      }
+      setStatus("No backend detected on 8080/8081. Start python main.py first.");
+      setStatusKind("bad");
+    }
+
+    async function loadPolicies() {
+      const data = await hit("/rot/policies");
+      const sel = document.getElementById("policySelect");
+      sel.innerHTML = "";
+      (data.policies || []).forEach(p => {
+        const opt = document.createElement("option");
+        opt.value = p.id;
+        opt.textContent = `${p.id} - ${p.name} (${p.record_type})`;
+        sel.appendChild(opt);
+      });
+    }
+
+    async function loadObjects() {
+      const data = await hit("/objects");
+      const body = document.getElementById("objectsBody");
+      body.innerHTML = "";
+      const showDeleted = document.getElementById("showDeletedToggle").checked;
+      (data.objects || []).forEach(o => {
+        if (!showDeleted && o.deleted) return;
+        const tr = document.createElement("tr");
+        const stageLabel = ["Hot", "Warm", "Cold", "Deleted"][Math.min(o.current_stage, 3)];
+        tr.innerHTML = `
+          <td>${o.id}</td>
+          <td>${o.record_type}</td>
+          <td>${o.original_filename || "-"}</td>
+          <td>${o.filename || "-"}</td>
+          <td>${(Number(o.current_size_bytes || 0) / 1024).toFixed(1)}</td>
+          <td><span class="stage s${o.current_stage}">${o.current_stage} (${stageLabel})</span></td>
+          <td>${o.deleted}</td>
+          <td>${o.legal_hold}</td>
+          <td>${o.do_not_decay}</td>
+          <td>
+            <button onclick="toggleHold(${o.id}, ${o.legal_hold ? "false" : "true"})">${o.legal_hold ? "Unhold" : "Hold"}</button>
+            <button onclick="toggleNoDecay(${o.id}, ${o.do_not_decay ? "false" : "true"})">${o.do_not_decay ? "Allow Decay" : "No Decay"}</button>
+            <button onclick="restore(${o.id})">Restore</button>
+            <button onclick="deleteNow(${o.id})">Delete</button>
+            <button onclick="renameFile(${o.id})">Rename</button>
+            <button class="secondary" onclick="openObjectFile(${o.id})">View Data</button>
+            <button class="secondary" onclick="inspectFromRow(${o.id})">Inspect</button>
+          </td>
+        `;
+        body.appendChild(tr);
+      });
+    }
+
+    async function runTick() {
+      setStatus("Running decay tick...");
+      setStatusKind("warn");
+      await hit("/rot/run", { method: "POST" });
+      await refreshAll();
+      setStatus("Tick complete");
+      setStatusKind("good");
+    }
+
+    async function uploadOnly(retry = true) {
+      try {
+        let policyId = document.getElementById("policySelect").value;
+        const fileInput = document.getElementById("uploadFileInput");
+        const file = fileInput.files[0];
+
+        if (!policyId) {
+          await createDefaultPolicy();
+          policyId = document.getElementById("policySelect").value;
+        }
+        if (!policyId) {
+          setStatus("Could not find/create a policy. Check backend and API key.");
+          setStatusKind("bad");
+          return;
+        }
+        if (!file) {
+          setStatus("Choose a file first.");
+          setStatusKind("bad");
+          return;
+        }
+
+        const dataUrl = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result);
+          reader.onerror = () => reject(new Error("file_read_failed"));
+          reader.readAsDataURL(file);
+        });
+        const base64 = String(dataUrl).split(",", 2)[1] || "";
+        let result;
+        try {
+          result = await hit("/upload", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              policy_id: Number(policyId),
+              filename: file.name,
+              mime_type: file.type,
+              content_base64: base64
+            })
+          });
+        } catch (e) {
+          if (e.message === "endpoint_not_found") {
+            result = await hit("/ingest", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                policy_id: Number(policyId),
+                filename: file.name,
+                mime_type: file.type,
+                content_base64: base64
+              })
+            });
+          } else {
+            throw e;
+          }
+        }
+        await refreshAll();
+        setStatus(`Created object ${result.object_id} as ${result.record_type}.`);
+        setStatusKind("good");
+      } catch (e) {
+        if (e.message === "unauthorized_api_key") {
+          setStatus("Create failed: API key is wrong.");
+        } else if (e.message === "network_unreachable") {
+          if (retry) {
+            await autoDetectBackend();
+            return uploadOnly(false);
+          }
+          setStatus("Create failed: backend not reachable. Restart ./start_local.ps1 and refresh page.");
+        } else {
+          setStatus(`Create failed: ${e.message}`);
+        }
+        setStatusKind("bad");
+      }
+    }
+
+    async function toggleHold(id, val) {
+      await hit(`/rot/control/${id}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ legal_hold: val })
+      });
+      await refreshAll();
+    }
+
+    async function toggleNoDecay(id, val) {
+      await hit(`/rot/control/${id}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ do_not_decay: val })
+      });
+      await refreshAll();
+    }
+
+    async function restore(id) {
+      await hit(`/rot/restore/${id}`, { method: "POST" });
+      await refreshAll();
+    }
+
+    async function deleteNow(id) {
+      try {
+        const out = await hit(`/objects/${id}/delete`, { method: "POST" });
+        if (!out.deleted) {
+          setStatus(`Delete failed for object ${id}.`);
+          setStatusKind("bad");
+          return;
+        }
+        await refreshAll();
+        setStatus(`Deleted object ${id}. File artifacts purge after more ticks.`);
+        setStatusKind("warn");
+      } catch (e) {
+        setStatus(`Delete failed: ${e.message}`);
+        setStatusKind("bad");
+      }
+    }
+
+    async function renameFile(id) {
+      const newName = prompt("New file name (example: report_v2.txt)");
+      if (!newName) return;
+      try {
+        const out = await hit(`/objects/${id}/rename`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ new_name: newName })
+        });
+        if (!out.renamed) {
+          setStatus(`Rename failed for object ${id}.`);
+          setStatusKind("bad");
+          return;
+        }
+        await refreshAll();
+        setStatus(`Renamed file for object ${id}.`);
+        setStatusKind("good");
+      } catch (e) {
+        setStatus(`Rename failed: ${e.message}`);
+        setStatusKind("bad");
+      }
+    }
+
+    async function inspectState() {
+      const id = document.getElementById("inspectId").value;
+      if (!id) return;
+      const data = await hit(`/rot/state/${id}`);
+      document.getElementById("stateOut").textContent = JSON.stringify(data, null, 2);
+      setStatus(`Showing history for object ${id}.`);
+      setStatusKind("good");
+    }
+
+    function inspectFromRow(id) {
+      document.getElementById("inspectId").value = String(id);
+      inspectState();
+    }
+
+    async function refreshAll() {
+      try {
+        setStatus("Refreshing...");
+        await Promise.all([loadPolicies(), loadObjects()]);
+        setStatus("Ready");
+        setStatusKind("good");
+      } catch (e) {
+        if (e.message === "unauthorized_api_key") {
+          setStatus("Backend reachable, but API key is wrong.");
+          setStatusKind("bad");
+        } else if (e.message === "invalid_api_url") {
+          setStatus("Invalid API URL. Example: http://127.0.0.1:8080");
+          setStatusKind("bad");
+        } else if (e.message === "network_unreachable") {
+          setStatus("Backend unreachable. Restart ./start_local.ps1 and refresh.");
+          setStatusKind("bad");
+        } else {
+          setStatus("Backend unreachable. Click Auto Detect or start server.");
+          setStatusKind("bad");
+        }
+      }
+    }
+
+    async function createDefaultPolicy() {
+      try {
+        await hit("/rot/policies", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: "dashboard_default",
+            policy: {
+              record_type: "log",
+              stage_one_after_sec: 10,
+              stage_two_after_sec: 20,
+              delete_after_sec: 30,
+              min_retention_sec: 0,
+              grace_delete_sec: 5,
+              restore_window_sec: 60,
+              access_cooldown_sec: 1,
+              weighted_scan_factor: 0.5
+            }
+          })
+        });
+        await refreshAll();
+        setStatus("Default policy created. You can now create objects.");
+        setStatusKind("good");
+      } catch (e) {
+        setStatus(`Could not create policy: ${e.message}`);
+        setStatusKind("bad");
+      }
+    }
+
+    function toggleAutoRefresh() {
+      const btn = document.getElementById("autoBtn");
+      if (autoTimer) {
+        clearInterval(autoTimer);
+        autoTimer = null;
+        btn.textContent = "Auto Refresh Off";
+        setStatus("Auto refresh disabled.");
+        setStatusKind("warn");
+        return;
+      }
+      autoTimer = setInterval(refreshAll, 3000);
+      btn.textContent = "Auto Refresh On";
+      setStatus("Auto refresh enabled (every 3s).");
+      setStatusKind("good");
+    }
+
+    if (window.location.protocol === "file:") {
+      document.getElementById("apiBase").value = "http://127.0.0.1:8080";
+      setStatus("Opened as file. Set API URL and click Test Connection.");
+    } else {
+      document.getElementById("apiBase").value = window.location.origin;
+      refreshAll();
+    }
+    document.getElementById("showDeletedToggle").addEventListener("change", refreshAll);
+  </script>
+</body>
+</html>

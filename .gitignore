@@ -1,0 +1,9 @@
+# TheSNMC RustDB ignore rules
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.venv/
+venv/
+decay.db
+.env

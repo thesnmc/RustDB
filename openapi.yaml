@@ -1,0 +1,88 @@
+openapi: 3.0.3
+info:
+  title: TheSNMC RustDB API
+  version: 1.0.0
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+security:
+  - ApiKeyAuth: []
+paths:
+  /healthz:
+    get:
+      security: []
+      responses:
+        "200": { description: ok }
+  /rot/policies:
+    get:
+      responses:
+        "200": { description: policy list }
+    put:
+      responses:
+        "200": { description: upserted }
+  /objects:
+    get:
+      responses:
+        "200": { description: object list }
+    post:
+      responses:
+        "201": { description: created }
+  /upload:
+    post:
+      responses:
+        "201": { description: file uploaded and tracked object created }
+  /ingest:
+    post:
+      responses:
+        "201": { description: universal ingest (text or file) created object }
+  /objects/{id}:
+    get:
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        "200": { description: object }
+  /rot/state/{id}:
+    get:
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        "200": { description: state }
+  /rot/run:
+    post:
+      responses:
+        "200": { description: decay tick }
+  /rot/restore/{id}:
+    post:
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        "200": { description: restored status }
+  /rot/control/{id}:
+    post:
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        "200": { description: control updated }
+  /rot/metrics:
+    get:
+      responses:
+        "200": { description: json metrics }
+  /metrics:
+    get:
+      responses:
+        "200": { description: prometheus metrics }

@@ -1,0 +1,2 @@
+"""TheSNMC RustDB package."""
+

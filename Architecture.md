@@ -1,4 +1,4 @@
-# 🏗️ Architecture & Design Document: TheSNMC RustDB
+# 🏗️ Architecture & Design Document: RustDB
 **Version:** 1.0.0 | **Date:** 2026-04-23 | **Author:** Sujay
 
 ---

@@ -1,6 +1,8 @@
 # 🚀 RustDB
 > A self-hosted lifecycle engine where data intentionally "rusts" over time unless accessed, automatically controlling storage growth by degrading and purging stale artifacts.
 
+[![License](https://img.shields.io/badge/License-TheSNMC-blue.svg)](LICENSE)
+
 ## 📖 Overview
 TheSNMC RustDB is a self-hosted lifecycle engine that ingests files and records, tracks their heat/fidelity, and applies staged transformations over time. Rather than keeping every uploaded file at full 100% fidelity forever, RustDB lets unaccessed data "decay." 
 
